@@ -1,0 +1,15 @@
+\section{The calibration module}
+
+The calibration module code is composed of three principal classes; (1) the MainWindow() class which inherits from the pyqt5 QMainWindow class and is responsible for managing and displaying all elements of the calibration module GUI, (2) the Scene() class which inherits from pyqt5's QGraphicsScene() and is responsible for managing all objects appearing in the interactive viewer (e.g., calibration images, calibration dots), and also contains the methods used to binarize the image, identify the calibration marker centroids and correct the positions of the calibration dots; and (3) the Calibration() class which contains the methods to perform the direct linear transformation (DLT) calibration and reconstruction. 
+
+What do you want to say:
+
+That a Scene object is created each time a new view is loaded.
+
+That both the original and binarized image are attributes of the Scene object. 
+
+The calibration dots are an instance of the Ellipse class, that are created each time the user double-clicks on the current scene. The calibration dots then become attributes of the Scene class. 
+
+The calibration table is populated from data available in each scene instance. 
+
+The methods used to binarize the image are cv2.threshold(), which ... . The method used to find the contours in the image is cv2.findContours(), which ... and the method used to locate the geometric-center of each 2D projection of each calibration marker is a combination of cv2.boundingRect() and cv2.Moments(), which respectively determine the location of the top-left pixel of the contour's bounding rectangle and the rectangle's lateral and vertical spans in pixels, and the contour's image moments. The location of the x pixel is calculated as the M10/M00 moment and the y pixel location is calculated as M01/M00. This approach returns the aritmetic mean centroid) of the contour produced by the calibration marker. Consequently, the method can only be presumed to provide an accurate estimate of the 'center' of the calibration marker if the 2D projection of the 3D object in object-space is circular. Consequenlty, ideal calibration markers are spherical therefore ensuring there 2D projections will always be nearly perfect circles. Other geometric forms can be used, but care must be taken to ensure that the errors in the returned centroids are minimized. 

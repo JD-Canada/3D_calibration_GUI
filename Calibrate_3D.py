@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import (QMainWindow, QApplication, QSlider,QColorDialog,
         QGraphicsItem, QGraphicsView, QVBoxLayout, QGridLayout,QGraphicsPixmapItem, QFrame,
         QPushButton,QTableView, QGraphicsItemGroup, QLabel, QFileDialog, QInputDialog, QLineEdit, QMessageBox, QGraphicsSimpleTextItem)
 from PyQt5.QtGui import QPainter, QTransform, QColor, QPixmap, QStandardItemModel, QStandardItem, QIcon, QBrush
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot,QPointF, QPoint, QRectF
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot,QPointF, QPoint, QRectF, QAbstractTableModel
 
 import sys
 import csv
@@ -11,59 +11,11 @@ import os
 import cv2
 import numpy as N
 import pandas as pd
+import time
 
 import user_interface
 
-class SelectMarkers:
-    
-    def __init__(self,imagePath,thresh,lowLim,upLim):
-        
-        self.point=1
-        self.imagePath=imagePath
-        self.threshold=thresh
-        self.lowLim=lowLim
-        self.upLim=upLim
-        self.findContours()
-        
-    def findContours(self):
-
-        inputFilepath = self.imagePath
-        filename_w_ext = os.path.basename(inputFilepath)
-        self.filename, file_extension = os.path.splitext(filename_w_ext)
-        self.root=os.path.dirname(os.path.abspath(inputFilepath))
-    
-        self.image = cv2.imread(self.imagePath)
-        imageGray = cv2.cvtColor(self.image,cv2.COLOR_BGR2GRAY)
-        ret,thresh = cv2.threshold(imageGray,self.threshold,255,cv2.THRESH_BINARY_INV)
-    
-        #Prevent a fatal crash because of version conflict in cv2.findContours
-        try:
-            
-            self.cnts, hierachy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        except ValueError:
-            ret, self.cnts, hierachy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)           
-    
-        self.good_cnts=[]
-        for c in self.cnts:
-            
-            if self.lowLim <= cv2.contourArea(c) <= self.upLim:
-                self.good_cnts.append(c)
-                cv2.drawContours(self.image, [c], -5, (50, 600, 0), 1)
-                # i=i+1
-
-                (xstart, ystart, w, h) = cv2.boundingRect(c)
-                M = cv2.moments(c)
-                try:
-                    cx = int(M['m10']/M['m00'])
-                    cy = int(M['m01']/M['m00'])
-                    cv2.circle(thresh,(cx,cy),2,(255,255,255),-1)
-                except ZeroDivisionError:
-                    continue
-            # self.point+=1
-
-        self.path=self.root+"\\" + self.filename+'_contours.jpg'
-        cv2.imwrite(self.path, thresh)
-
+"""
 class ImageViewer(QGraphicsView):
     photoClicked = pyqtSignal(QPoint)
 
@@ -136,6 +88,32 @@ class ImageViewer(QGraphicsView):
         if self._photo.isUnderMouse():
             self.photoClicked.emit(self.mapToScene(event.pos()).toPoint())
         super(ImageViewer, self).mousePressEvent(event)
+"""
+
+class PandasModel(QAbstractTableModel):
+    """
+    Class to populate a table view with a pandas dataframe
+    """
+    def __init__(self, data, parent=None):
+        QAbstractTableModel.__init__(self, parent)
+        self._data = data
+
+    def rowCount(self, parent=None):
+        return len(self._data.values)
+
+    def columnCount(self, parent=None):
+        return self._data.columns.size
+
+    def data(self, index, role=Qt.DisplayRole):
+        if index.isValid():
+            if role == Qt.DisplayRole:
+                return str(self._data.values[index.row()][index.column()])
+        return None
+
+    def headerData(self, col, orientation, role):
+        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
+            return self._data.columns[col]
+        return None
 
 class Image(QGraphicsPixmapItem):
     """ create Pixmap image for each scene"""
@@ -149,15 +127,86 @@ class Scene(QGraphicsScene):
     entered = pyqtSignal([QGraphicsItem],[QGraphicsEllipseItem])
     leave = pyqtSignal([QGraphicsItem],[QGraphicsEllipseItem])
     move = pyqtSignal([QGraphicsItem],[QGraphicsEllipseItem])
-    """creates scenes to hold Pixmap image and circles """
-    def __init__(self,path):
-        super(Scene,self).__init__()
-        self.path=path
-        self.image = Image(self.path)        
-        self.addItem(self.image)
+    # press = pyqtSignal([QGraphicsItem],[QGraphicsEllipseItem])
+    """Each instance holds all image and ellipse data"""
+    def __init__(self,MainWindow,**keywords):
+        # executes QGraphicsScene.__init__()
+        super().__init__()
+        
+        # self.sceneCount=self.counter
+        self.MainWindow=MainWindow
+        self.keywords=keywords
+        self.threshold=self.MainWindow.binary_sb.value()
+        self.populated=False
+
+        if 'path' in self.keywords.keys():
+            self.getPathData(self.keywords['path'])
+            self.binarize_image()
+            self.findContours()
+            self.image = Image(self.path)   
+            self.addItem(self.image)
+
+        if 'headers' in self.keywords.keys():
+            self.headx_px = self.keywords['headers'][0]
+            self.heady_px = self.keywords['headers'][1]
+            xheader = self.headx_px.split("_")
+            yheader = self.heady_px.split("_")
+            self.sceneID = list(set(xheader).intersection(set(yheader)))[0]
+        else:
+            self.headx_px="%s_x" %self.filename
+            self.heady_px="%s_y" %self.filename
+            self.sceneID="%s" %(self.filename)
+
+        self.dotCoords={}
+        if 'coords' in self.keywords.keys():
+            self.pointCount=len(self.keywords['coords'][0])
+            self.dotCoords['x_px']= self.keywords['coords'][0]
+            self.dotCoords['y_px']= self.keywords['coords'][1]
+        else:
+            self.pointCount=0
+
+            self.dotCoords['x_px']=[None]*len(self.MainWindow.pointData.index)
+            self.dotCoords['y_px']=[None]*len(self.MainWindow.pointData.index)
+
+        if self.sceneID in self.MainWindow.scenes:
+            self.sceneID="%s_copy" %(self.sceneID)
+        
+        self.MainWindow.view_lw.addItem(self.sceneID)
+
+    def setThreshold(self):
+        self.threshold=self.MainWindow.binary_sb.value()
+        
+    def populateDotsOnLink(self):
+        
         self.pointCount=0
-        self.elp_x_pos=[]
-        self.elp_y_pos=[]
+        for i in range(len(self.MainWindow.pointData.index)):
+            self.circle=Ellipse(0,0, 10, 10,self.pointCount)
+            self.circle.setPos(self.dotCoords['x_px'][i]-5,self.dotCoords['y_px'][i]-5)
+            self.addItem(self.circle)
+            self.pointCount += 1
+        self.populated=True
+
+    def linkView(self,path):
+
+        if path[0]!='':
+
+            self.getPathData(path[0])
+            
+            
+            self.clear()
+            
+            self.image = Image(self.path)   
+            self.addItem(self.image)
+            self.binarize_image()
+            self.findContours()
+
+            self.populateDotsOnLink()
+
+    def getPathData(self,path):
+        self.path=path
+        self.filename_w_ext = os.path.basename(path)
+        self.filename, file_extension = os.path.splitext(self.filename_w_ext)
+        self.root=os.path.dirname(os.path.abspath(path))
 
     def remove_image(self):
         self.removeItem(self.image)
@@ -165,6 +214,144 @@ class Scene(QGraphicsScene):
     def refresh_image(self,path):
         self.image = Image(self.path)        
         self.addItem(self.image)
+
+    def binarize_image(self):
+        
+        self.orig_image = cv2.imread(self.path)
+        self.cnts_image=self.orig_image
+        imageGray = cv2.cvtColor(self.orig_image,cv2.COLOR_BGR2GRAY)
+        
+        ret,self.cvBinaryImage = cv2.threshold(imageGray,self.threshold,255,cv2.THRESH_BINARY_INV)
+
+        self.binaryImagePath=self.root+"\\" + self.filename+'_binary.jpg'
+        cv2.imwrite(self.binaryImagePath, self.cvBinaryImage)
+        
+        # self.binarySceneName='%s_binary' % str(self.sceneID)
+        self.binaryImage = Image(self.binaryImagePath)  
+        
+    def findContours(self):
+
+        #Prevents a fatal crash due to version conflict in cv2.findContours
+        try:
+            
+            self.cnts, hierachy = cv2.findContours(self.cvBinaryImage, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        except ValueError:
+            ret, self.cnts, hierachy = cv2.findContours(self.cvBinaryImage, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)           
+    
+        self.good_cnts=[]
+        for c in self.cnts:
+            
+            if 5 <= cv2.contourArea(c) <= 500:
+                self.good_cnts.append(c)
+                cv2.drawContours(self.cnts_image, [c], -5, (255, 0, 0), 1)
+                
+                (xstart, ystart, w, h) = cv2.boundingRect(c)
+                M = cv2.moments(c)
+                try:
+                    cx = int(M['m10']/M['m00'])
+                    cy = int(M['m01']/M['m00'])
+                    cv2.circle(self.cnts_image,(cx,cy),2,(0,0,255),-1)
+                except ZeroDivisionError:
+                    continue
+        
+        self.cntsImagePath=self.root+"\\" + self.filename+'_cnts.jpg'
+        cv2.imwrite(self.cntsImagePath, self.cnts_image)
+        self.contourImage=Image(self.cntsImagePath)
+
+    def clearView(self):
+        self.removeItem(self.image)
+        self.removeItem(self.binaryImage)
+        self.removeItem(self.contourImage)
+
+    def showBinaryImage(self):
+        self.clearView()
+        self.addItem(self.binaryImage)
+
+    def showContourImage(self):
+        self.clearView()
+        self.addItem(self.contourImage)
+
+    def showOriginalImage(self):
+        self.clearView()
+        self.addItem(self.image)
+
+    def correct_centers(self):
+        
+        self.findContours()
+
+        for idx, i in enumerate(self.items()):
+            
+            if isinstance(i, Ellipse):
+                
+                for c in self.good_cnts:
+                    (xstart, ystart, w, h) = cv2.boundingRect(c)
+
+                    x=i.pos().toPoint().x()+5
+                    y=i.pos().toPoint().y()+5
+                    
+                    if xstart <= x <= xstart+w and ystart <= y <= ystart+h:
+                        M = cv2.moments(c)
+                        try:
+                            cx = int(M['m10']/M['m00'])
+                            cy = int(M['m01']/M['m00'])
+
+                            i.setX(cx-5)
+                            i.setY(cy-5)
+                            self.MainWindow.ellipseMove(i)
+                            i.setBrush(QColor('green'))
+                            
+                        except ZeroDivisionError:
+                            continue
+
+    def showCoords(self, event):
+        try:
+            self.removeItem(self.text)
+            self.removeItem(self.dot)
+        except AttributeError:
+            pass
+        p=self.MainWindow.View.mapToScene(event.x(),event.y())
+        self.dot=QGraphicsEllipseItem(int(p.x())-3,int(p.y())-3, 6, 6)
+        self.dot.setBrush(Qt.blue)
+        self.addItem(self.dot)
+        self.text=QGraphicsSimpleTextItem("x%s_y%s" % (str(int(p.x())+5),str(int(p.y())+5)))
+        self.text.setBrush(Qt.red)
+        self.text.setPos(p.x(), p.y())
+        self.addItem(self.text)
+        # self.removeItem(self.text)
+
+    def removeInfo(self, item):
+        self.current_scene.removeItem(self.text)
+
+    def add_point(self, event):
+        
+        try:
+            self.path
+        except AttributeError:
+            self.MainWindow.errMessage="Please link calibration point data with a calibration view"
+            self.MainWindow.errorTitle="Calibration view not linked"
+            self.MainWindow.errorMsg()
+            return None             
+
+        if self.pointCount == self.MainWindow.num_points:
+            self.MainWindow.errMessage="You have placed all the points listed in the calibration point file. If you wish to add more points, add more rows to the point file and start over."
+            self.MainWindow.errorTitle="Cannot place any more points"
+            self.MainWindow.errorMsg()
+            return None
+
+        p=self.MainWindow.View.mapToScene(event.x(),event.y())
+        self.circle=Ellipse(0,0, 10, 10,self.pointCount)
+        self.circle.setPos(p.x()-5,p.y()-5)
+        self.addItem(self.circle)
+        self.dotCoords['x_px'][self.pointCount]=int(p.x())
+        self.dotCoords['y_px'][self.pointCount]=int(p.y())
+        self.MainWindow.refreshTableData()
+        self.pointCount += 1
+
+    def updateTableOnEllipseMove(self,x,y,item):
+        
+        self.dotCoords['x_px'][item.count]=int(x)
+        self.dotCoords['y_px'][item.count]=int(y)
+        self.MainWindow.refreshTableData()
 
 class Ellipse(QGraphicsEllipseItem):
     """creates circles placed in scene"""
@@ -179,6 +366,7 @@ class Ellipse(QGraphicsEllipseItem):
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         self.setCursor(Qt.SizeAllCursor)
+        self.setZValue(100)
 
     def hoverEnterEvent(self, event) :
         super().hoverEnterEvent(event)
@@ -233,8 +421,8 @@ class DLT:
             raise ValueError('%dD DLT requires at least %d calibration points. Only %d points were entered.' %(nd, 2*nd, np))
             
         #Normalize the data to improve the DLT quality (DLT is dependent of the system of coordinates).
-        #This is relevant when there is a considerable perspective distortion.
-        #Normalization: mean position at origin and mean distance equals to 1 at each direction.
+        #This is relevant when there is a considerable perspective distortionp.
+        #Normalization: mean position at origin and mean distance equals to 1 at each directionp.
         Txyz, xyzn = self.Normalization(nd, xyz)
         Tuv, uvn = self.Normalization(2, uv)
 
@@ -270,7 +458,6 @@ class DLT:
         #mean distance:
         self.err = N.sqrt( N.mean(N.sum( (uv2[0:2,:].T - uv)**2,1 )) ) 
 
-        print('succeeded')
         return self.L, self.err
 
     def Normalization(self,nd,x):
@@ -324,7 +511,7 @@ class DLT:
         if Ls.ndim > 1 and nc != Ls.shape[0]:
             raise ValueError('Number of views (%d) and number of sets of camera calibration parameters (%d) are different.' %(nc, Ls.shape[0]))
         if nd == 3 and Ls.ndim == 1:
-            raise ValueError('At least two sets of camera calibration parameters are needed for 3D point reconstruction.')
+            raise ValueError('At least two sets of camera calibration parameters are needed for 3D point reconstructionp.')
 
         if nc == 1: #2D and 1 camera (view), the simplest (and fastest) case
             #One could calculate inv(H) and input that to the code to speed up things if needed.
@@ -362,13 +549,8 @@ class MainWindow(QMainWindow, user_interface.Ui_MainWindow):
         self.setupUi(self)
         self.setWindowTitle("Calibrate 3D")
         self.setWindowIcon(QIcon(os.path.dirname(os.path.abspath(__file__))+'/dice.png'))
-        self.tableCreated=False
-
-        self.scenes=[]
-        self.contour_scenes=[]
-        self.calscenes=[]
-        self.calibrations=[]
-        self.viewPaths=[]
+        
+        self.scenes={}
         self.calibrate=DLT(3,2)
         self.tableCreated=False
 
@@ -377,449 +559,354 @@ class MainWindow(QMainWindow, user_interface.Ui_MainWindow):
     def initUI(self):   
         
         #button connects
-        self.addPointFile_b.clicked.connect(self.createTable)
-        self.loadFilledTable_b.clicked.connect(self.loadTableData)
-        # self.continue_b.clicked.connect(self.continueCal)
-        self.newView_b.clicked.connect(self.add_scene)
+        self.addPointFile_b.clicked.connect(self.newGetCalibrationPoints)
+        self.loadFilledTable_b.clicked.connect(self.readInTable)
+        self.loadCal_b.clicked.connect(self.loadCalibration)
+        self.newView_b.clicked.connect(self.new_add_scene)
+        self.link_b.clicked.connect(self.linkView)
         self.correct_b.clicked.connect(self.button_correct_centers)
-        self.binary_b.clicked.connect(self.redo_binarization)
+        self.binary_sb.valueChanged.connect(self.redo_binarization)
         self.saveTable_b.clicked.connect(self.saveTable)
         self.calibrate_b.clicked.connect(self.calibrate3D)
         self.loadTest_b.clicked.connect(self.loadTestTableData)
         self.testCal_b.clicked.connect(self.test3DCalibration)
+        self.delete_b.clicked.connect(self.deleteView)
+        self.saveTest_b.clicked.connect(self.saveTestData)
+        self.saveCalibration_b.clicked.connect(self.saveCalibration)
         
-        self.nmbViews1.valueChanged.connect(self.checkViews1)
-        self.nmbViews2.valueChanged.connect(self.checkViews2)
-
         #list widget connects
-        self.view_lw.clicked.connect(self.change_scene)
-        self.contour_lw.clicked.connect(self.change_contour_scene)
-
+        # self.view_lw.clicked.connect(self.change_scene)
+        self.view_lw.currentRowChanged.connect(self.change_scene)
+        self.original_rb.toggled.connect(self.change_scene)
+        self.binary_rb.toggled.connect(self.change_scene)
+        self.contour_rb.toggled.connect(self.change_scene)
+        
         #other
         self.View.mouseDoubleClickEvent= self.add_point
         self.slider.setRange(1, 500)
         self.slider.setValue(100)
         self.slider.valueChanged[int].connect(self.onZoom)
+        self.groupBox_8.setVisible(False)
+        self.link_b.setVisible(False)
+        self.radioButton_2.toggled['bool'].connect(self.link_b.setVisible)
+
+    def linkView(self):
+
+        if self.view_lw.count() == 0:
+            self.errMessage="No views available for linking."
+            self.errorTitle="Cannot link view"
+            self.errorMsg()
+            return None            
+
+        self.selectedItemText=self.view_lw.currentItem().text()
+        self.current_scene=self.scenes[self.selectedItemText]
+
+        path=QFileDialog.getOpenFileName(self,
+        "Load image view",filter="Image Files( *.png *.jpg)")
+
+        self.scenes[self.selectedItemText].linkView(path)
+        self.change_scene()
+        self.View.setScene(self.current_scene)
+
+    def deleteView(self):
         
-        self.saveTest_b.clicked.connect(self.saveTestData)
+        try:
+            self.selectedItemText=self.view_lw.currentItem().text()
+        except AttributeError:
+            self.errMessage="Please click on the view to remove."
+            self.errorTitle="No view selected"
+            self.errorMsg()
+            return None
+        xCol=str(self.scenes[self.selectedItemText].headx_px)
+        yCol=str(self.scenes[self.selectedItemText].heady_px)
+        self.pointData.drop(columns=[xCol, yCol],inplace =True)
+        self.scenes.pop(self.selectedItemText)
+        self.view_lw.takeItem(self.view_lw.currentRow())
 
-    """
-    User interface management methods
-    """
-    def checkViews1(self):
-
-        if self.nmbViews1.value() > 1:
-            self.addPointFile_b.setEnabled(True)
-        if self.nmbViews1.value() < 2:
-            self.addPointFile_b.setEnabled(False)
-    
-    def checkViews2(self):
-
-        if self.nmbViews2.value() > 1:
-            self.loadFilledTable_b.setEnabled(True)
-        if self.nmbViews2.value() < 2:
-            self.loadFilledTable_b.setEnabled(False)
+        try:
+            self.firstSceneKey=list(self.scenes.keys())[0]
+            self.current_scene=self.scenes[self.firstSceneKey]
+            self.current_scene.showOriginalImage()
+            item=self.view_lw.findItems(self.current_scene.sceneID,Qt.MatchExactly)[0]
+            item.setSelected(True)
+            self.view_lw.setCurrentItem(item)
+            self.View.setScene(self.current_scene)
+        except IndexError:
+            self.current_scene.clear()
+        except AttributeError:
+            pass
+        
+        self.tableWidget.setModel(PandasModel(self.pointData))
 
     """
     Table loading and manipulation methods
     """
-    def createTable(self):
+    def newGetCalibrationPoints(self):
 
-        self.nmbViews=self.nmbViews1.value()
-
+        self.promptSceneDelete()
         pointFilePath=QFileDialog.getOpenFileName(self,"Load point data file",filter="Text files( *.txt *.csv)")
 
         if pointFilePath[0]!='':
-            if self.tableCreated:
-                self.tableWidget.clear() 
-            self.num_points = sum(1 for line in open(pointFilePath[0]))
-            self.tableWidget.setRowCount(self.num_points)                
 
-            self.populateTableHeaders()
+            self.pointData=pd.read_csv(pointFilePath[0])
+            self.num_points=len(self.pointData.index)
+            self.nmbViews=(len(self.pointData.columns)-3)/2
+            if self.nmbViews > 0:
+                self.errMessage="Please load a file containing colums for only the point coordinates."
+                self.errorTitle="File contains view data!"
+                self.errorMsg()
+                return None  
+            self.tableWidget.setModel(PandasModel(self.pointData))
+            self.tabWidget.setCurrentIndex(1)
+            self.pointFile_l.setText(pointFilePath[0])         
+    
+    def refreshTableData(self):
+
+        for key in self.scenes:
+
+            for inner_key in self.scenes[key].dotCoords:
+                if inner_key == 'x_px':
+                    self.pointData[self.scenes[key].headx_px]=self.scenes[key].dotCoords[inner_key]
+                if inner_key == 'y_px':
+                    self.pointData[self.scenes[key].heady_px]=self.scenes[key].dotCoords[inner_key]
+
+        self.tableWidget.setModel(PandasModel(self.pointData))
+
+    def promptSceneDelete(self):
+
+        if self.view_lw.count() > 0:
+
+            reply = QMessageBox.question(self, 'Continue?', 
+                    'Loading a new calibration table will delete existing views, accept?', QMessageBox.Yes, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                self.scenes={}
+                self.view_lw.clear()
+            else:
+                return None
             
-            #populate table with x,y,z data
-            with open(pointFilePath[0]) as csv_file:
-                csv_reader = csv.reader(csv_file, delimiter=',')
-                for count, row in enumerate(csv_reader):
-                        self.tableWidget.setItem(count,0, QTableWidgetItem(row[0]))
-                        self.tableWidget.setItem(count,1, QTableWidgetItem(row[1]))
-                        self.tableWidget.setItem(count,2, QTableWidgetItem(row[2]))
-            self.tableCreated=True
-            self.groupBox_2.setEnabled(True) 
-            self.groupBox_6.setEnabled(True)          
+    
+    def readInTable(self):
 
-    def loadTableData(self):
-
-        self.nmbViews=self.nmbViews2.value()
-
-        pointFilePath=QFileDialog.getOpenFileName(self,"Load previously populated point data file",filter="Text files( *.txt *.csv)")
+        self.promptSceneDelete()
+        pointFilePath=QFileDialog.getOpenFileName(self,"Load populated point data file",filter="Text files( *.txt *.csv)")
 
         if pointFilePath[0]!='':
-            if self.tableCreated:
-                self.tableWidget.clear()
-            self.num_points = sum(1 for line in open(pointFilePath[0]))
-            self.tableWidget.setRowCount(self.num_points)                
-            self.populateTableHeaders()
- 
-            #populate table with x,y,z data
-            try:
-                with open(pointFilePath[0]) as csv_file:
-                    csv_reader = csv.reader(csv_file, delimiter=',')
-                    for row, rowData in enumerate(csv_reader):
-                        for column in range(self.tableWidget.columnCount()):
-                            self.tableWidget.setItem(row,column, QTableWidgetItem(rowData[column]))
-                self.tableCreated=True
-                self.groupBox_2.setEnabled(True)    
-                self.groupBox_6.setEnabled(True)          
+            self.pointData=pd.read_csv(pointFilePath[0])
+            self.num_points=len(self.pointData.index)
+            self.nmbViews=int((len(self.pointData.columns)-3)/2)
+            self.headers=list(self.pointData.columns) 
 
-            except IndexError:
-                self.tableWidget.clear()
-                self.errMessage="Missing columns. Either choose less views, or maybe you are trying to load a calibration marker coordinate file (only xyz)?"
-                self.errorTitle="Cannot load this file"
+            if self.nmbViews < 2:
+                self.errMessage="File does not contain data sufficient for at least two views"
+                self.errorTitle="Not enough views in file"
                 self.errorMsg()
-                return None                        
+                return None 
 
+            col=3
+            for i in range(self.nmbViews):
+                colNames=[]
+                colNames.append(self.headers[col])
+                colNames.append(self.headers[col+1])
+                
+                coords=[]
+                coords.append(self.pointData[self.headers[col]])
+                coords.append(self.pointData[self.headers[col+1]])
+
+                self.current_scene=Scene(self,coords=coords,headers=colNames)
+                self.current_scene.entered.connect(self.displayInfo)
+                self.current_scene.leave.connect(self.removeInfo)
+                self.current_scene.move.connect(self.ellipseMove)
+                
+                self.scenes[self.current_scene.sceneID]=self.current_scene
+                # self.View.setScene(self.current_scene)
+                item=self.view_lw.findItems(self.current_scene.sceneID,Qt.MatchExactly)[0]
+                item.setSelected(True)
+                self.view_lw.setCurrentItem(item)
+                # self.newView_b.setText("Add view")
+                
+                col+=2
+
+            self.pointFile_l.setText(pointFilePath[0])
+            self.tableWidget.setModel(PandasModel(self.pointData))
+            self.tabWidget.setCurrentIndex(1)
             
     def saveTable(self):
 
         path = QFileDialog.getSaveFileName(
                 self, 'Save File', '', 'CSV(*.csv)')[0]
+        self.pointData.to_csv(path,index=False)
         
-        if path:
-            with open(path, 'w', newline='') as stream:
-                writer = csv.writer(stream)
-                for row in range(self.tableWidget.rowCount()):
-                    rowdata = []
-                    for column in range(self.tableWidget.columnCount()):
-                        item = self.tableWidget.item(row, column)
-                        
-                        if item is not None:
-                            rowdata.append(
-                                str(item.text()))
-                            print(item.text())
-
-                    writer.writerow(rowdata)
-
-    def loadTestTableData(self):
-
-        pointFilePath=QFileDialog.getOpenFileName(self,"Load test data file",filter="Text files( *.txt *.csv)")
-
-        if pointFilePath[0]!='':
- 
-            self.num_points = sum(1 for line in open(pointFilePath[0]))
-            self.test_tableWidget.setRowCount(self.num_points)                
-            self.populateTestTableHeaders()
- 
-            #populate table with x,y,z data
-            with open(pointFilePath[0]) as csv_file:
-                csv_reader = csv.reader(csv_file, delimiter=',')
-                for row, rowData in enumerate(csv_reader):
-                    for column in range(self.test_tableWidget.columnCount()):
-                        self.test_tableWidget.setItem(row,column, QTableWidgetItem(rowData[column]))
-    
-            self.test_tableCreated=True    
-
-    def populateTestTableHeaders(self):
-        
-        self.test_tableWidget.setColumnCount(3+2*self.nmbViews)
-
-        headers=['x', 'y', 'z']
-        
-        for i in range(self.nmbViews):
-            
-            headers.append('v%s_x_px' % str(i+1))
-            headers.append('v%s_y_px' % str(i+1))
-        
-        self.test_tableWidget.setHorizontalHeaderLabels(headers)
-        style = "::section {""background-color: lightgrey; }"
-        style = "::section {""background-color: darkgrey; }"
-        self.test_tableWidget.horizontalHeader().setStyleSheet(style)
-        self.test_tableWidget.verticalHeader().setStyleSheet(style)
-
-    def populateTableHeaders(self):
-        
-        self.tableWidget.setColumnCount(3+2*self.nmbViews)
-
-        headers=['x', 'y', 'z']
-        
-        for i in range(self.nmbViews):
-            
-            headers.append('v%s_x_px' % str(i+1))
-            headers.append('v%s_y_px' % str(i+1))
-        
-        self.tableWidget.setHorizontalHeaderLabels(headers)
-        style = "::section {""background-color: lightgrey; }"
-        style = "::section {""background-color: darkgrey; }"
-        self.tableWidget.horizontalHeader().setStyleSheet(style)
-        self.tableWidget.verticalHeader().setStyleSheet(style)
-
 
     """
     View and Scene related methods
     """
-    def add_scene(self):
 
+    def new_add_scene(self):
+
+        if not hasattr(self, 'pointData'):
+
+            self.errMessage="Please load a point file or a populate calibration file and then try again."
+            self.errorTitle="Cannot add view!"
+            self.errorMsg()
+            return None       
+
+        viewPath=QFileDialog.getOpenFileName(self,
+        "Load image view",filter="Image Files( *.png *.jpg)")
+
+        if viewPath[0]!='':
+
+            self.current_scene=Scene(self,path=viewPath[0])
+            self.current_scene.entered.connect(self.displayInfo)
+            self.current_scene.leave.connect(self.removeInfo)
+            self.current_scene.move.connect(self.ellipseMove)
+            
+            self.scenes[self.current_scene.sceneID]=self.current_scene
+            self.View.setScene(self.current_scene)
+            item=self.view_lw.findItems(self.current_scene.sceneID,Qt.MatchExactly)[0]
+            item.setSelected(True)
+            self.view_lw.setCurrentItem(item)
+            self.newView_b.setText("Add view")
+
+            self.pointData[self.current_scene.headx_px]=N.nan
+            self.pointData[self.current_scene.heady_px]=N.nan
+            self.tableWidget.setModel(PandasModel(self.pointData))
+
+    def my_decorator(self):
+        
+        for count, scene in enumerate(self.scenes):
+            
+            if scene in self.selectedItemText:
+                
+                self.current_scene=self.scenes[scene]
+                
+
+    def change_scene(self):
+        self.tabWidget.setCurrentIndex(0)
         try:
-            if len(self.scenes)>=int(self.nmbViews):
-                self.errMessage="Cannot add anymore views. Please start again and specify the correct number of views."
-                self.errorTitle="Cannot add anymore views."
-                self.errorMsg()
-                return None               
+            self.selectedItemText=self.view_lw.currentItem().text()
+           
+            self.my_decorator()
+
+            if not hasattr(self.current_scene, 'path'):
+                emptyScene=QGraphicsScene()
+                self.View.setScene(emptyScene)
+                return None
+                
+            self.binary_sb.setValue(self.current_scene.threshold)
+            
+            if self.original_rb.isChecked()==True:
+                self.current_scene.showOriginalImage()
+            elif self.binary_rb.isChecked()==True:
+                self.current_scene.showBinaryImage()
+            elif self.contour_rb.isChecked()==True:
+                self.current_scene.showContourImage()
+            self.View.setScene(self.current_scene)
         except AttributeError:
             pass
 
-        if self.view_lw.count() == 0:
-            
-            viewPath=QFileDialog.getOpenFileName(self,
-            "Load image view",filter="Image Files( *.png *.jpg)")
-
-            if viewPath[0]!='':
- 
-                self.current_scene=Scene(viewPath[0])
-                self.current_scene.entered.connect(self.displayInfo)
-                self.current_scene.leave.connect(self.removeInfo)
-                self.current_scene.move.connect(self.ellipseMove)
-                self.scenes.append(self.current_scene)
-
-                self.View.setScene(self.current_scene)
-
-                for count, scene in enumerate(self.scenes):
-                    if self.current_scene==self.scenes[count]:
-                        self.current_scene_idx=count
-                base=os.path.basename(viewPath[0])
-                self.view_lw.addItem("%s_V%s" %(os.path.splitext(base)[0],str(self.current_scene_idx+1)))
-
-                self.sceneCount=len(self.scenes)
-                self.view_lw.item(self.sceneCount-1).setSelected(True)
-                self.view_lw.setCurrentRow(self.sceneCount-1)
-                self.newView_b.setText("Add another view")
-                self.viewPaths.append(viewPath)
-                self.correct_centers(way_in="internal")
-                self.contour_lw.setCurrentRow(self.sceneCount-1)
-
-        else:
-
-            viewPath=QFileDialog.getOpenFileName(self,
-                        "Load image view",filter="Image Files( *.png *.jpg)")
-
-            if viewPath[0]!='':
-    
-                self.current_scene=Scene(viewPath[0])
-                self.current_scene.entered.connect(self.displayInfo)
-                self.current_scene.leave.connect(self.removeInfo)
-                self.current_scene.move.connect(self.ellipseMove)
-                self.scenes.append(self.current_scene)
-
-                for count, scene in enumerate(self.scenes):
-                    if self.current_scene==self.scenes[count]:
-                        self.current_scene_idx=count
-
-                base=os.path.basename(viewPath[0])
-                self.view_lw.addItem("%s_V%s" %(os.path.splitext(base)[0],str(self.current_scene_idx+1)))
-                self.View.setScene(self.current_scene)
-
-                self.sceneCount=len(self.scenes)
-                self.view_lw.item(self.sceneCount-1).setSelected(True)
-                self.view_lw.setCurrentRow(self.sceneCount-1)
-                self.viewPaths.append(viewPath)
-                self.correct_centers(way_in="internal")
-                self.contour_lw.setCurrentRow(self.sceneCount-1)
-
-    def change_scene(self):
-        self.current_scene=self.scenes[self.view_lw.currentRow()]
-        self.View.setScene(self.current_scene)
-        self.current_scene_idx=self.view_lw.currentRow()
-
-    def change_contour_scene(self):
-        self.current_scene=self.contour_scenes[self.contour_lw.currentRow()]
-        self.View.setScene(self.current_scene)
-        # self.current_scene_idx=self.view_lw.currentRow()
-
     def redo_binarization(self):
 
-        
-        self.cal_current_scene=[]
-        self.lowLim=int(self.lowContour_le.text())
-        self.upLim=int(self.upContour_le.text())
-        self.thresh=int(self.binary_le.text())
+        if not hasattr(self, 'pointData'):
+                self.errMessage="Please select a view then try again."
+                self.errorTitle="No view selected!"
+                self.errorMsg()
+                return None    
 
-        image=SelectMarkers(self.viewPaths[self.contour_lw.currentRow()][0],self.thresh,self.lowLim,self.upLim)
+        try:
+            self.selectedItemText=self.view_lw.currentItem().text()
+            
+        except IndexError:
+            self.errMessage="Please click on a view to work with."
+            self.errorTitle="No view selected"
+            self.errorMsg()
+            return None
+        except AttributeError:
+            self.errMessage="Please click on a view to work with."
+            self.errorTitle="No view selected"
+            self.errorMsg()
+            return None      
 
-        self.calibrations[self.contour_lw.currentRow()]=image
-        self.cal_current_scene=Scene(image.path)
-        contourScene='%s_ctrs' % (self.view_lw.item(self.contour_lw.currentRow()).text())               
-        i=self.contour_lw.findItems(contourScene, Qt.MatchExactly)
-    
-        self.contour_scenes[self.contour_lw.indexFromItem(i[0]).row()]=self.cal_current_scene
-    
-        self.change_contour_scene()
+        try:
+            self.my_decorator()
+            self.current_scene.setThreshold()
+            self.current_scene.findContours()
+            self.current_scene.binarize_image()
+            self.change_scene()
+        except AttributeError:
+            pass
 
     def onZoom(self, value):
-    
         val = value / 100    
         self.View.resetTransform()
         self.View.scale(val, val)    
-
 
     """
     Calibration marker methods
     """
     def add_point(self, event):
-        
-        if self.current_scene.pointCount == self.num_points:
-            self.errMessage="You have placed all the points listed in the calibration point file. If you wish to add more points, add more rows to the point file and start over."
-            self.errorTitle="Cannot place any more points"
-            self.errorMsg()
-            return None
+        self.current_scene.add_point(event)
 
-        if self.current_scene_idx > self.nmbViews-1:
-            return None
-        
-        p=self.View.mapToScene(event.x(),event.y())
-        self.current_scene.pointCount=self.current_scene.pointCount+1
-        self.circle=Ellipse(0,0, 10, 10,self.current_scene.pointCount)
-        self.circle.setPos(p.x()-5,p.y()-5)
-        self.current_scene.addItem(self.circle)
-        
-        x=str(p.x()-5)
-        y=str(p.y()-5)            
-        self.tableWidget.setItem(self.current_scene.pointCount-1,self.current_scene_idx+3+self.current_scene_idx*1, QTableWidgetItem(x))
-        self.tableWidget.setItem(self.current_scene.pointCount-1,self.current_scene_idx+4+self.current_scene_idx*1, QTableWidgetItem(y))
+    def showCoords(self, event):
+        self.current_scene.showCoords(event)
 
     def button_correct_centers(self):
+        try:
+            self.current_scene.correct_centers()
+            self.change_scene()
+        except AttributeError:
+            pass
 
-        self.correct_centers(way_in='button')
-
-    def correct_centers(self, way_in):
-        
-        self.cal_current_scene=[]
-        self.lowLim=int(self.lowContour_le.text())
-        self.upLim=int(self.upContour_le.text())
-        self.thresh=int(self.binary_le.text())
-        
-
-        if way_in == "internal":
-            try:
-
-                image=SelectMarkers(self.viewPaths[self.view_lw.currentRow()][0],self.thresh,self.lowLim,self.upLim)
-                self.calibrations.append(image)
-                self.cal_current_scene=Scene(image.path)
-                contourScene='%s_ctrs' % (self.view_lw.item(self.view_lw.currentRow()).text())
-
-                self.contour_scenes.append(self.cal_current_scene)
-                self.contour_lw.addItem(contourScene)
-
-            except AttributeError:
-                self.errMessage="Please select an original view (not binarized) to manipulate"
-                self.errorTitle="Select an original view"
-                self.errorMsg()
-                return None
-
-        elif way_in=="button":
-
-            try:
-
-                image=SelectMarkers(self.viewPaths[self.contour_lw.currentRow()][0],self.thresh,self.lowLim,self.upLim)
-
-                self.calibrations[self.contour_lw.currentRow()]=image
-                self.cal_current_scene=Scene(image.path)
-                contourScene='%s_ctrs' % (self.view_lw.item(self.contour_lw.currentRow()).text())               
-                i=self.contour_lw.findItems(contourScene, Qt.MatchExactly)
-            
-                self.contour_scenes[self.contour_lw.indexFromItem(i[0]).row()]=self.cal_current_scene
-
-            except AttributeError:
-                self.errMessage="Please select an original view (not binarized) to manipulate"
-                self.errorTitle="Select an original view"
-                self.errorMsg()
-                return None            
-
-            
-        for count, scene in enumerate(self.scenes):
-            if self.current_scene==self.scenes[count]:
-                self.current_scene_idx=count
-
-        self.sceneCount=len(self.scenes)
-
-        #add ellipse positions to scenes
-
-        for idx, i in enumerate(self.scenes[self.view_lw.currentRow()].items()):
-            
-            if isinstance(i, Ellipse):
-                
-                for c in self.calibrations[self.view_lw.currentRow()].good_cnts:
-                    (xstart, ystart, w, h) = cv2.boundingRect(c)
-
-                    x=i.pos().toPoint().x()+5
-                    y=i.pos().toPoint().y()+5
-                    
-                    if xstart <= x <= xstart+w and ystart <= y <= ystart+h:
-                        M = cv2.moments(c)
-                        try:
-                            cx = int(M['m10']/M['m00'])
-                            cy = int(M['m01']/M['m00'])
-
-                            i.setX(cx-5)
-                            i.setY(cy-5)
-                            self.current_scene_idx=self.view_lw.currentRow()
-                            self.ellipseMove(i)
-                            i.setBrush(QColor('green'))
-                            
-                        except ZeroDivisionError:
-                            continue
-
-        self.current_scene_idx=self.view_lw.currentRow()
-        self.change_scene()
- 
     def displayInfo(self, item):
-        
-        self.text=QGraphicsSimpleTextItem("P_%s" % str(item.count))
-        self.text.setBrush(Qt.blue)
+        self.text=QGraphicsSimpleTextItem("P%s_x%s_y%s" % (str(item.count+1),str(item.pos().toPoint().x()+5),str(item.pos().toPoint().y()+5)))
+        self.text.setBrush(Qt.red)
         self.text.setPos(item.pos().toPoint().x()+10, item.pos().toPoint().y()+10)
         self.current_scene.addItem(self.text)
 
     def removeInfo(self, item):
-        
         self.current_scene.removeItem(self.text)
 
     def ellipseMove(self, item):
-
         item.setBrush(QColor('red'))
         self.current_scene.removeItem(self.text)
         x=str(item.pos().toPoint().x()+5)
-        y=str(item.pos().toPoint().y()+5)           
-        self.tableWidget.setItem(item.count-1,self.current_scene_idx+3+self.current_scene_idx*1, QTableWidgetItem(x))
-        self.tableWidget.setItem(item.count-1,self.current_scene_idx+4+self.current_scene_idx*1, QTableWidgetItem(y))
+        y=str(item.pos().toPoint().y()+5)  
 
+        self.current_scene.updateTableOnEllipseMove(x,y,item)         
 
     """
     Calibration and testing methods
     """
     def calibrate3D(self):
 
-        #set up xyz coords list
-        xyz = []
-        for row in range(self.tableWidget.rowCount()):
-            container=[]
-            for column in range(3):
-                item = self.tableWidget.item(row, column)
-                
-                container.append(float(item.text()))
-            xyz.append(container)
-        
-        #list of px coord lists
-        px_coords = []
-        for view in range(self.nmbViews):
-            view_coords=[]
-            for row in range(self.tableWidget.rowCount()):
-                
-                x_column = 3 + 2*(view)
-                y_column = 4 + 2*(view)
-                x_item = self.tableWidget.item(row, x_column)
-                y_item = self.tableWidget.item(row, y_column)
-                coords=[float(x_item.text()),float(y_item.text())]
-                view_coords.append(coords)
+        try:
+            x=list(self.pointData['x'])
+            y=list(self.pointData['y'])
+            z=list(self.pointData['z'])
 
+        except AttributeError:
+            self.errMessage="Fully populate the calibration table to continue."
+            self.errorTitle="Calibration table not correctly populated!"
+            self.errorMsg()
+            return None   
+
+        #set up xyz coords list
+        xyz=[]
+
+        for i in range(len(x)):
+                point=[]
+                point.append(x[i])
+                point.append(y[i])
+                point.append(z[i])
+                print(point)
+                xyz.append(point)
+ 
+        px_coords=[]
+        for key in self.scenes:
+            view_coords=[]
+            x_px=list(self.pointData[self.scenes[key].headx_px])
+            y_px=list(self.pointData[self.scenes[key].heady_px])
+            view_coords.append(x_px)
+            view_coords.append(y_px)
             px_coords.append(view_coords)
         
         self.nmbDim=3
@@ -827,78 +914,150 @@ class MainWindow(QMainWindow, user_interface.Ui_MainWindow):
         errors=[]
         
         self.nmbCam=self.nmbViews
-        
-
+    
         #get parameters for each view
         for view in px_coords:
-            L, err = self.calibrate.DLTcalib(self.nmbDim, xyz, view)
+            uv=[]
+            for i in range(len(view[0])):
+                
+                pair=[]
+                pair.append(view[0][i])
+                pair.append(view[1][i])
+                uv.append(pair)
+            L, err = self.calibrate.DLTcalib(self.nmbDim, xyz, uv)
+            
             self.coefficients.append(L)
             errors.append(err)
-            
+        
+
+    def loadTestTableData(self):
+
+        pointFilePath=QFileDialog.getOpenFileName(self,"Load populated test table",filter="Text files( *.txt *.csv)")
+
+        if pointFilePath[0]!='':
+            self.testData=pd.read_csv(pointFilePath[0])
+            self.numTestPoints=len(self.testData.index)
+            self.numTestViews=int((len(self.testData.columns)-3)/2)
+            self.testHeaders=list(self.testData.columns) 
+
+            if self.numTestViews < 2:
+                self.errMessage="File contains less than two views"
+                self.errorTitle="Not enough views in file"
+                self.errorMsg()
+                return None 
+
+        self.test_tableView.setModel(PandasModel(self.testData))
+
+    def saveCalibration(self):
+
+        try:
+            test=self.coefficients
+
+        except AttributeError:
+            self.errMessage="Perform a calibration and then try again."
+            self.errorTitle="No calibration available!"
+            self.errorMsg()
+            return None   
+
+        path = QFileDialog.getSaveFileName(
+                self, 'Save File', '', 'CSV(*.csv)')[0]
+        if path:
+            print(self.coefficients)
+            self.coefficients_df=pd.DataFrame(self.coefficients)
+            self.coefficients_df.to_csv(path,sep=',',index=False,header=False)
+
+    def loadCalibration(self):
+        pointFilePath=QFileDialog.getOpenFileName(self,"Load calibration file",filter="Text files( *.txt *.csv)")
+        self.coefficients=[]
+    
+        if pointFilePath[0]!='':
+            self.dfCoefficients=pd.read_csv(pointFilePath[0],header=None)
+        
+            for index, row in self.dfCoefficients.iterrows():
+                self.coefficients.append(N.asarray(list(row)))
+        self.tabWidget.setCurrentIndex(2)
+
     def test3DCalibration(self):            
 
-        #set up xyz coords list
-        xyz = []
-        for row in range(self.test_tableWidget.rowCount()):
-            container=[]
-            for column in range(3):
-                item = self.test_tableWidget.item(row, column)
-                
-                container.append(float(item.text()))
-            xyz.append(container)
-        
-        #list of px coord lists
-        px_coords = []
-        for view in range(self.nmbViews):
-            view_coords=[]
-            for row in range(self.test_tableWidget.rowCount()):
-                
-                x_column = 3 + 2*(view)
-                y_column = 4 + 2*(view)
-                x_item = self.test_tableWidget.item(row, x_column)
-                y_item = self.test_tableWidget.item(row, y_column)
-                coords=[float(x_item.text()),float(y_item.text())]
-                view_coords.append(coords)
+            x=list(self.testData[self.testHeaders[0]])
+            y=list(self.testData[self.testHeaders[1]])
+            z=list(self.testData[self.testHeaders[2]])
 
-            px_coords.append(view_coords)
+            self.testXYZ=[]
+            for i in range(self.numTestPoints):
+                testCoord=[]
+                testCoord.append(x[i])
+                testCoord.append(y[i])
+                testCoord.append(z[i])
+                self.testXYZ.append(testCoord)
+            
+            testPxCoords=[]
+            col=3
+            for i in range(self.numTestViews):
+                colNames=[]
 
-        xyz1234 = N.zeros((len(xyz),3))
-        #use parameters to reconstruct input points 
-        for i in range(len(px_coords[0])):
-            i_px_coords=[]
-            for view in px_coords:
-                i_px_coords.append(view[i])
+                colNames.append(self.testHeaders[col])
+                colNames.append(self.testHeaders[col+1])
+                x_px=list(self.testData[self.testHeaders[col]])
+                y_px=list(self.testData[self.testHeaders[col+1]])
+            
+                coords=[]
+                for i in range(len(x_px)):
+                    pair=[]
+                    pair.append(x_px[i])
+                    pair.append(y_px[i])
+                    coords.append(pair)
 
-            xyz1234[i,:] = self.calibrate.DLTrecon(self.nmbDim,self.nmbCam,self.coefficients,i_px_coords)
-
-        rec_xyz=pd.DataFrame(xyz1234,columns=['rec_x','rec_y','rec_z'])
-        xyz=pd.DataFrame(xyz,columns=['x','y','z'])
-        self.results=pd.concat([xyz,rec_xyz], axis=1)
-        self.results['x_e']=self.results['x']-self.results['rec_x']
-        self.results['y_e']=self.results['y']-self.results['rec_y']
-        self.results['z_e']=self.results['z']-self.results['rec_z']
-
-        self.xmean_l.setText(str(((self.results.x - self.results.rec_x)**2).mean()**.5))
-        self.ymean_l.setText(str(((self.results.y - self.results.rec_y)**2).mean()**.5))
-        self.zmean_l.setText(str(((self.results.z - self.results.rec_z)**2).mean()**.5))
-
-        self.pointsTested_l.setText(str(self.test_tableWidget.rowCount()))
-        # self.ystd_l.setText(str(self.results['y_e'].std()))
-        # self.zstd_l.setText(str(self.results['z_e'].std()))
+                testPxCoords.append(coords)
+                col+=2
 
 
+            xyz1234 = N.zeros((len(self.testXYZ),3))
+            print(self.coefficients)
+            #use parameters to reconstruct input points 
+            for i in range(len(testPxCoords[0])):
+                i_px_coords=[]
+                for view in testPxCoords:
+                    i_px_coords.append(view[i])
+                try:
+                    xyz1234[i,:] = self.calibrate.DLTrecon(3,self.numTestViews,self.coefficients,i_px_coords)
+                except AttributeError:
+                    self.errMessage="No calibration available"
+                    self.errorTitle="Perform a calibration, then try again."
+                    self.errorMsg()
+                    return None   
+                except ValueError:
+                    self.errMessage="Ensure you have loaded a valid calibration file and a valid marker test point file. The calibration file should have 12 columns and as many rows as were used to perform the calibration. The test point file should have 2x the number of views used to obtain the calibration plus 3 more columns for the object-space coordinates."
+                    self.errorTitle="Calibration and test point files are incompatabile!"
+                    self.errorMsg()
+                    return None                                       
 
-        # print(x_std,y_std,z_std)
-        print(self.results)
 
-        # print(N.mean(N.sqrt(N.sum((N.array(xyz1234)-N.array(xyz))**2,1))))
+            rec_xyz=pd.DataFrame(xyz1234,columns=['rec_x','rec_y','rec_z'])
+            xyz=pd.DataFrame(self.testXYZ,columns=['x','y','z'])
+            self.results=pd.concat([xyz,rec_xyz], axis=1)
+            self.results['x_e']=self.results['x']-self.results['rec_x']
+            self.results['y_e']=self.results['y']-self.results['rec_y']
+            self.results['z_e']=self.results['z']-self.results['rec_z']
+
+            self.xmean_l.setText("%.4f" % ((self.results.x - self.results.rec_x)**2).mean()**.5)
+            self.ymean_l.setText("%.4f" % ((self.results.y - self.results.rec_y)**2).mean()**.5)
+            self.zmean_l.setText("%.4f" % ((self.results.z - self.results.rec_z)**2).mean()**.5)
+
+            self.pointsTested_l.setText(str(self.numTestPoints))
+
+            self.errorTitle="Calibration test successful!"
+            self.errMessage="The test completed with success. If desired, consult the simple statistics below or save the test's results and postprocess with a third party application."
+            self.errorMsg()
+            # print(self.results)
+
+            # print(N.mean(N.sqrt(N.sum((N.array(xyz1234)-N.array(xyz))**2,1))))
 
     def saveTestData(self):
         path = QFileDialog.getSaveFileName(
                 self, 'Save File', '', 'CSV(*.csv)')[0]
         if path:
             self.results.to_csv(path,sep=',',index=False)
-
 
     """
     Utility functions
@@ -911,32 +1070,7 @@ class MainWindow(QMainWindow, user_interface.Ui_MainWindow):
         msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
         retval = msg.exec_()        
 
-    def continueCal(self):
-        
-        if self.nmbViews < 2:
-            self.errMessage="Please specify at least 2 views"
-            self.errorTitle="Not enough views"
-            self.groupBox_2.setDisabled(True)
-            self.addPointFile_b.setEnabled(True)
-            self.nmbViews.setEnabled(True)
-            self.errorMsg()
-            return None  
-        
-        if not self.tableCreated:
-            self.errMessage="Please choose calibration point file before continuing"
-            self.errorTitle="Calibration file not specified"
-            self.groupBox_2.setDisabled(True)
-            self.addPointFile_b.setEnabled(True)
-            self.nmbViews.setEnabled(True)
-            self.errorMsg()
-            return None   
-        else:
-            self.continue_b.setDisabled(True)    
-
-           
 app = QApplication([])
 ex = MainWindow()
 ex.show()
 sys.exit(app.exec_())
-
-
